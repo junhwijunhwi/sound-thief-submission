@@ -23,8 +23,8 @@ COLORS = {
 class Sprites:
     def __init__(self):
         names = (
-            "player-idle", "player-walk-front", "player-walk-right",
-            "hearing-guard-idle", "hearing-guard-walk", "sound-bottle",
+            "player-idle", "player-walk-front", "player-walk-right", "player-walk-back",
+            "hearing-guard-idle", "hearing-guard-walk", "hearing-guard-walk-back", "sound-bottle",
             "player-pickup", "hearing-guard-capture",
         )
         self.images = {
@@ -39,20 +39,25 @@ class Sprites:
         )
 
     def player(self, actor, x, y):
-        horizontal = actor.facing[0]
-        if actor.frame is not None or not horizontal:
+        horizontal, vertical = actor.facing
+        index = actor.frame if actor.frame is not None else 1
+        if vertical < 0:
+            self.frame("player-walk-back", x, y, index)
+        elif actor.frame is not None or not horizontal:
             direction = "right" if horizontal else "front"
-            self.frame(f"player-walk-{direction}", x, y, actor.frame if actor.frame is not None else 1,
-                       flip=horizontal < 0)
+            self.frame(f"player-walk-{direction}", x, y, index, flip=horizontal < 0)
         else:
             self.frame("player-idle", x, y, flip=horizontal < 0)
 
     def guard(self, actor, x, y):
-        horizontal = actor.facing[0]
-        if actor.frame is None and horizontal:
+        horizontal, vertical = actor.facing
+        index = actor.frame if actor.frame is not None else 1
+        if vertical < 0:
+            self.frame("hearing-guard-walk-back", x, y, index)
+        elif actor.frame is None and horizontal:
             self.frame("hearing-guard-idle", x, y, flip=horizontal < 0)
         else:
-            self.frame("hearing-guard-walk", x, y, actor.frame if actor.frame is not None else 1,
+            self.frame("hearing-guard-walk", x, y, index,
                        bottom=0 if horizontal else SPRITE_SIZE, flip=horizontal < 0)
 
 
