@@ -1,8 +1,10 @@
 import os
 from pathlib import Path
+from time import monotonic
 
 import pico2d as pico
 
+from animation import Actor, CAPTURE_TIME, PICKUP_TIME, TurnAnimation, Walk, frame_index
 from game import Game
 
 
@@ -10,6 +12,7 @@ ROOT = Path(__file__).resolve().parent
 TILE_SIZE = 52
 MARGIN = 28
 MAP_BOTTOM = 106
+SPRITE_SIZE = 48
 COLORS = {
     "#": (39, 49, 69),
     ".": (79, 90, 110),
@@ -26,7 +29,43 @@ MOVES = {
 }
 
 
-def draw(game, font, title_font):
+class Sprites:
+    def __init__(self):
+        names = (
+            "player-idle", "player-walk-front", "player-walk-right",
+            "hearing-guard-idle", "hearing-guard-walk", "sound-bottle",
+            "player-pickup", "hearing-guard-capture",
+        )
+        self.images = {
+            name: pico.load_image(str(ROOT / "assets" / "sprites" / f"{name}.png"))
+            for name in names
+        }
+
+    def frame(self, name, x, y, index=0, bottom=0, flip=False):
+        self.images[name].clip_composite_draw(
+            index * SPRITE_SIZE, bottom, SPRITE_SIZE, SPRITE_SIZE,
+            0, "h" if flip else "", x, y, SPRITE_SIZE, SPRITE_SIZE,
+        )
+
+    def player(self, actor, x, y):
+        horizontal = actor.facing[0]
+        if actor.frame is not None or not horizontal:
+            direction = "right" if horizontal else "front"
+            self.frame(f"player-walk-{direction}", x, y, actor.frame if actor.frame is not None else 1,
+                       flip=horizontal < 0)
+        else:
+            self.frame("player-idle", x, y, flip=horizontal < 0)
+
+    def guard(self, actor, x, y):
+        horizontal = actor.facing[0]
+        if actor.frame is None and horizontal:
+            self.frame("hearing-guard-idle", x, y, flip=horizontal < 0)
+        else:
+            self.frame("hearing-guard-walk", x, y, actor.frame if actor.frame is not None else 1,
+                       bottom=0 if horizontal else SPRITE_SIZE, flip=horizontal < 0)
+
+
+def draw(game, font, title_font, sprites, player, guard, animation, elapsed):
     def cell_position(cell):
         x, y = cell
         return MARGIN + x * TILE_SIZE, MAP_BOTTOM + (game.map.height - 1 - y) * TILE_SIZE
@@ -38,6 +77,23 @@ def draw(game, font, title_font):
             y + TILE_SIZE - inset - 1, *color, filled=True,
         )
         font.draw(x + TILE_SIZE // 2 - 9, y + TILE_SIZE // 2, label, (255, 255, 255))
+
+    def center(cell):
+        x, y = cell_position(cell)
+        return x + (TILE_SIZE - 2) / 2, y + (TILE_SIZE - 2) / 2
+
+    bottle_visible = not game.has_bottle
+    pickup_frame = capture_frame = None
+    if animation is not None:
+        player = animation.player.pose(elapsed)
+        guard = animation.guard.pose(elapsed - animation.guard_start)
+        if animation.picked_up:
+            if elapsed < animation.player.duration:
+                bottle_visible = True
+            elif elapsed < animation.guard_start:
+                pickup_frame = frame_index(elapsed - animation.player.duration, PICKUP_TIME)
+        if animation.captured and elapsed >= animation.capture_start:
+            capture_frame = frame_index(elapsed - animation.capture_start, CAPTURE_TIME)
 
     pico.clear_canvas()
     pico.draw_rectangle(
@@ -58,17 +114,26 @@ def draw(game, font, title_font):
                 pico.draw_rectangle(left, bottom, right, top, 209, 176, 252)
             if tile == "E":
                 marker(cell, "출", (32, 96, 165), 9)
-            elif tile == "B" and not game.has_bottle:
-                marker(cell, "병", (135, 100, 19), 9)
+            elif tile == "B" and bottle_visible:
+                sprites.images["sound-bottle"].draw(*center(cell))
 
-    marker(game.guard.position, "경", (175, 81, 36), 6)
-    if game.player != game.guard.position:
-        marker(game.player, "나", (78, 76, 179), 6)
+    if game.result != "실패" or animation is not None:
+        if pickup_frame is None:
+            sprites.player(player, *center(player.cell))
+        else:
+            sprites.frame("player-pickup", *center(player.cell), pickup_frame, flip=player.facing[0] < 0)
+    if capture_frame is None:
+        sprites.guard(guard, *center(guard.cell))
+    else:
+        flip = guard.facing[0] < 0
+        if animation.guard.duration == 0:
+            flip = animation.player.start[0] < guard.cell[0]
+        sprites.frame("hearing-guard-capture", *center(guard.cell), capture_frame, flip=flip)
 
     status = f"{game.turn}턴   |   소리 병 {'획득' if game.has_bottle else '미획득'}   |   경비 {game.guard.mode}"
-    if game.result == "성공":
+    if game.result == "성공" and animation is None:
         status = f"{game.turn}턴 만에 탈출 성공   |   R로 다시 시작"
-    elif game.result == "실패":
+    elif game.result == "실패" and animation is None:
         status = "경비에게 잡혔습니다   |   R로 재도전"
     elif game.blocked:
         status += "   |   벽에 막힘"
@@ -85,10 +150,17 @@ def run():
         MAP_BOTTOM + game.map.height * TILE_SIZE + 70,
     )
     try:
+        sprites = Sprites()
         font_path = Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts" / "malgun.ttf"
         font = pico.load_font(str(font_path), 17)
         title_font = pico.load_font(str(font_path), 28)
+        player, guard = Actor(game.player), Actor(game.guard.position)
+        animation = None
+        pending_move = None
         while True:
+            now = monotonic()
+            if animation is not None and now - animation.started >= animation.duration:
+                animation = None
             for event in pico.get_events():
                 if event.type == pico.SDL_QUIT:
                     return
@@ -98,9 +170,28 @@ def run():
                     return
                 if event.key == pico.SDLK_r:
                     game.reset()
+                    player, guard = Actor(game.player), Actor(game.guard.position)
+                    animation = None
+                    pending_move = None
                 elif event.key in MOVES:
-                    game.act(MOVES[event.key])
-            draw(game, font, title_font)
+                    if pending_move is None and game.result is None:
+                        pending_move = MOVES[event.key]
+            if animation is None and pending_move is not None:
+                old_turn, had_bottle = game.turn, game.has_bottle
+                game.act(pending_move)
+                pending_move = None
+                if game.turn != old_turn:
+                    player_walk = Walk.between(player.cell, game.player, player.facing)
+                    guard_walk = Walk.between(guard.cell, game.guard.position, guard.facing)
+                    animation = TurnAnimation(
+                        now, player_walk, guard_walk, game.has_bottle and not had_bottle, game.result == "실패",
+                    )
+                    player = Actor(game.player, player_walk.facing)
+                    guard = Actor(game.guard.position, guard_walk.facing)
+                    if not animation.duration:
+                        animation = None
+            elapsed = now - animation.started if animation is not None else 0
+            draw(game, font, title_font, sprites, player, guard, animation, elapsed)
             pico.delay(1 / 30)
     finally:
         pico.close_canvas()
